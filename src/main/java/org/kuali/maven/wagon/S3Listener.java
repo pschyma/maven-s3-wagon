@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright 2010-2015 The Kuali Foundation
  *
  * Licensed under the Educational Community License, Version 2.0 (the "License");
@@ -15,16 +15,17 @@
  */
 package org.kuali.maven.wagon;
 
-import java.net.URI;
-import java.net.URISyntaxException;
-
 import org.apache.maven.wagon.events.SessionEvent;
 import org.apache.maven.wagon.events.SessionListener;
 import org.apache.maven.wagon.events.TransferEvent;
 import org.apache.maven.wagon.events.TransferListener;
-import org.kuali.common.aws.s3.SimpleFormatter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.time.Duration;
+import java.time.temporal.ChronoUnit;
 
 /**
  * Listen for events about the transfer and record timing and byte count information
@@ -34,7 +35,6 @@ import org.slf4j.LoggerFactory;
  */
 public class S3Listener implements TransferListener, SessionListener {
 	final Logger log = LoggerFactory.getLogger(S3Listener.class);
-	SimpleFormatter formatter = new SimpleFormatter();
 	SessionTracker sessionTracker = new SessionTracker();
 
 	public void transferCompleted(final TransferEvent transferEvent) {
@@ -120,23 +120,21 @@ public class S3Listener implements TransferListener, SessionListener {
 		sessionTracker.addSessionEvent(sessionEvent);
 		// log(sessionEvent.getWagon().getRepository().getUrl() + " - Disconnected");
 		sessionTracker.setDisconnected(System.currentTimeMillis());
+
 		int transferCount = sessionTracker.getTransfers().size();
-		long byteCount = 0;
-		// long transferElapsed = 0;
-		for (TransferTracker tt : sessionTracker.getTransfers()) {
-			byteCount += tt.getByteCount();
-			// transferElapsed += tt.getCompleted() - tt.getStarted();
+		if (transferCount == 0) {
+			return;
 		}
+
+		long byteCount = sessionTracker.getTransfers().stream().mapToLong(TransferTracker::getByteCount).sum();
 		long elapsed = sessionTracker.getDisconnected() - sessionTracker.getOpened();
-		StringBuilder sb = new StringBuilder();
-		sb.append("Transfers: " + transferCount);
-		sb.append(" Time: " + formatter.getTime(elapsed));
-		sb.append(" Amount: " + formatter.getSize(byteCount));
-		// sb.append(" Rate: " + formatter.getRate(transferElapsed, byteCount));
-		sb.append(" Throughput: " + formatter.getRate(elapsed, byteCount));
-		if (transferCount > 0) {
-			log.info(sb.toString());
-		}
+		Duration duration = Duration.of(elapsed, ChronoUnit.MILLIS);
+
+		String sb =
+			"Transfers: " + transferCount + " Time: " + duration + " Amount: " + bytesIntoHumanReadable(byteCount)
+			// sb.append(" Rate: " + formatter.getRate(transferElapsed, byteCount));
+			+ " Throughput: " + byteCount / duration.getSeconds() + " bytes/second";//.getRate// (elapsed, byteCount));
+		log.info(sb);
 	}
 
 	/**
@@ -173,5 +171,34 @@ public class S3Listener implements TransferListener, SessionListener {
 	public void debug(final String message) {
 		log.debug(message);
 	}
+
+
+
+	private String bytesIntoHumanReadable(long bytes) {
+		long kilobyte = 1024;
+		long megabyte = kilobyte * 1024;
+		long gigabyte = megabyte * 1024;
+		long terabyte = gigabyte * 1024;
+
+		if ((bytes >= 0) && (bytes < kilobyte)) {
+			return bytes + " B";
+
+		} else if ((bytes >= kilobyte) && (bytes < megabyte)) {
+			return (bytes / kilobyte) + " KB";
+
+		} else if ((bytes >= megabyte) && (bytes < gigabyte)) {
+			return (bytes / megabyte) + " MB";
+
+		} else if ((bytes >= gigabyte) && (bytes < terabyte)) {
+			return (bytes / gigabyte) + " GB";
+
+		} else if (bytes >= terabyte) {
+			return (bytes / terabyte) + " TB";
+
+		} else {
+			return bytes + " Bytes";
+		}
+	}
+
 
 }

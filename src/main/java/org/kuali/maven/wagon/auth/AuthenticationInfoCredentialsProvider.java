@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright 2010-2015 The Kuali Foundation
  *
  * Licensed under the Educational Community License, Version 2.0 (the "License");
@@ -17,27 +17,31 @@ package org.kuali.maven.wagon.auth;
 
 import org.apache.maven.wagon.authentication.AuthenticationInfo;
 
-import com.amazonaws.auth.AWSCredentials;
-import com.amazonaws.auth.AWSCredentialsProvider;
-import com.google.common.base.Optional;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 
-public final class AuthenticationInfoCredentialsProvider implements AWSCredentialsProvider {
+import javax.annotation.Nonnull;
+import java.util.Optional;
 
-	public AuthenticationInfoCredentialsProvider(Optional<AuthenticationInfo> auth) {
-		Assert.notNull(auth);
+public final class AuthenticationInfoCredentialsProvider implements AwsCredentialsProvider {
+
+	private final AuthenticationInfo auth;
+
+	public AuthenticationInfoCredentialsProvider(@Nonnull AuthenticationInfo auth) {
 		this.auth = auth;
 	}
 
-	private final Optional<AuthenticationInfo> auth;
+	@Override
+	public AwsCredentials resolveCredentials() {
+		String accessKey = Optional.ofNullable(auth.getUserName()).orElse("").trim();
+		String secretKey = Optional.ofNullable(auth.getPassword()).orElse("").trim();
 
-	public AWSCredentials getCredentials() {
-		if (!auth.isPresent()) {
-			throw new IllegalStateException(getAuthenticationErrorMessage());
+		if (accessKey.isEmpty() || secretKey.isEmpty()) {
+			throw new IllegalArgumentException(getAuthenticationErrorMessage());
 		}
-		String accessKey = auth.get().getUserName();
-		String secretKey = auth.get().getPassword();
-		Assert.noBlanksWithMsg(getAuthenticationErrorMessage(), accessKey, secretKey);
-		return new AwsCredentials(accessKey, secretKey);
+
+		return AwsBasicCredentials.create(accessKey, secretKey);
 	}
 
 	public void refresh() {
@@ -45,7 +49,7 @@ public final class AuthenticationInfoCredentialsProvider implements AWSCredentia
 	}
 
 	protected String getAuthenticationErrorMessage() {
-		StringBuffer sb = new StringBuffer();
+		StringBuilder sb = new StringBuilder();
 		sb.append("The S3 wagon needs AWS Access Key set as the username and AWS Secret Key set as the password. eg:\n");
 		sb.append("<server>\n");
 		sb.append("  <id>my.server</id>\n");

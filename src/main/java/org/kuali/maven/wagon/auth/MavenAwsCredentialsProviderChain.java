@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright 2010-2015 The Kuali Foundation
  *
  * Licensed under the Educational Community License, Version 2.0 (the "License");
@@ -15,46 +15,27 @@
  */
 package org.kuali.maven.wagon.auth;
 
-import java.util.ArrayList;
-import java.util.List;
-
 import org.apache.maven.wagon.authentication.AuthenticationInfo;
-
-import com.amazonaws.auth.AWSCredentialsProvider;
-import com.amazonaws.auth.AWSCredentialsProviderChain;
-import com.amazonaws.auth.EnvironmentVariableCredentialsProvider;
-import com.amazonaws.auth.InstanceProfileCredentialsProvider;
-import com.amazonaws.auth.SystemPropertiesCredentialsProvider;
-import com.google.common.base.Optional;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProviderChain;
+import software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.InstanceProfileCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.SystemPropertyCredentialsProvider;
 
 /**
  * This chain searches for AWS credentials in system properties -> environment variables -> ~/.m2/settings.xml -> Amazon's EC2 Instance Metadata Service
  */
-public final class MavenAwsCredentialsProviderChain extends AWSCredentialsProviderChain {
+public final class MavenAwsCredentialsProviderChain {
 
-	public MavenAwsCredentialsProviderChain(Optional<AuthenticationInfo> auth) {
-		super(getProviders(auth));
+	public static AwsCredentialsProviderChain create() {
+		return AwsCredentialsProviderChain.of(SystemPropertyCredentialsProvider.create(),
+																					EnvironmentVariableCredentialsProvider.create(),
+																					InstanceProfileCredentialsProvider.create());
 	}
 
-	private static AWSCredentialsProvider[] getProviders(Optional<AuthenticationInfo> auth) {
-		List<AWSCredentialsProvider> providers = new ArrayList<AWSCredentialsProvider>();
-
-		// System properties always win
-		providers.add(new SystemPropertiesCredentialsProvider());
-
-		// Then fall through to environment variables
-		providers.add(new EnvironmentVariableCredentialsProvider());
-
-		// Then fall through to settings.xml
-		providers.add(new AuthenticationInfoCredentialsProvider(auth));
-
-		// Then fall through to Amazon's EC2 Instance Metadata Service
-		// http://docs.aws.amazon.com/AWSSdkDocsJava/latest/DeveloperGuide/java-dg-roles.html
-		// This allows you setup an IAM role, attach that role to an EC2 Instance at launch time,
-		// and thus automatically provide the wagon with the credentials it needs
-		providers.add(new InstanceProfileCredentialsProvider());
-
-		return providers.toArray(new AWSCredentialsProvider[providers.size()]);
+	public static AwsCredentialsProviderChain create(AuthenticationInfo auth) {
+		return AwsCredentialsProviderChain.of(SystemPropertyCredentialsProvider.create(),
+																					EnvironmentVariableCredentialsProvider.create(),
+																					new AuthenticationInfoCredentialsProvider(auth),
+																					InstanceProfileCredentialsProvider.create());
 	}
-
 }

@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright 2010-2015 The Kuali Foundation
  *
  * Licensed under the Educational Community License, Version 2.0 (the "License");
@@ -15,16 +15,6 @@
  */
 package org.kuali.maven.wagon;
 
-import java.io.File;
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.util.ArrayList;
-import java.util.Date;
-import java.util.List;
-
-import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang.StringUtils;
 import org.apache.maven.wagon.ResourceDoesNotExistException;
 import org.apache.maven.wagon.TransferFailedException;
@@ -32,37 +22,36 @@ import org.apache.maven.wagon.authentication.AuthenticationInfo;
 import org.apache.maven.wagon.proxy.ProxyInfo;
 import org.apache.maven.wagon.repository.Repository;
 import org.apache.maven.wagon.repository.RepositoryPermissions;
-import org.kuali.common.aws.s3.S3Utils;
-import org.kuali.common.aws.s3.SimpleFormatter;
-import org.kuali.common.threads.ExecutionStatistics;
-import org.kuali.common.threads.ThreadHandlerContext;
-import org.kuali.common.threads.ThreadInvoker;
-import org.kuali.common.threads.listener.PercentCompleteListener;
-import org.kuali.maven.wagon.auth.AwsCredentials;
-import org.kuali.maven.wagon.auth.AwsSessionCredentials;
 import org.kuali.maven.wagon.auth.MavenAwsCredentialsProviderChain;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.http.nio.netty.NettyNioAsyncHttpClient;
+import software.amazon.awssdk.services.s3.S3AsyncClient;
+import software.amazon.awssdk.services.s3.model.BucketCannedACL;
+import software.amazon.awssdk.services.s3.model.CommonPrefix;
+import software.amazon.awssdk.services.s3.model.GetBucketLocationResponse;
+import software.amazon.awssdk.services.s3.model.ListObjectsRequest;
+import software.amazon.awssdk.services.s3.model.ListObjectsResponse;
+import software.amazon.awssdk.services.s3.model.S3Object;
 
-import com.amazonaws.AmazonClientException;
-import com.amazonaws.AmazonServiceException;
-import com.amazonaws.ClientConfiguration;
-import com.amazonaws.Protocol;
-import com.amazonaws.auth.AWSCredentials;
-import com.amazonaws.auth.AWSCredentialsProviderChain;
-import com.amazonaws.auth.AWSSessionCredentials;
-import com.amazonaws.services.s3.AmazonS3Client;
-import com.amazonaws.services.s3.internal.Mimetypes;
-import com.amazonaws.services.s3.internal.RepeatableFileInputStream;
-import com.amazonaws.services.s3.model.CannedAccessControlList;
-import com.amazonaws.services.s3.model.ListObjectsRequest;
-import com.amazonaws.services.s3.model.ObjectListing;
-import com.amazonaws.services.s3.model.ObjectMetadata;
-import com.amazonaws.services.s3.model.PutObjectRequest;
-import com.amazonaws.services.s3.model.S3Object;
-import com.amazonaws.services.s3.model.S3ObjectSummary;
-import com.amazonaws.services.s3.transfer.TransferManager;
-import com.google.common.base.Optional;
+import javax.annotation.Nullable;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.Serializable;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
 /**
  * <p>
@@ -99,28 +88,24 @@ public class S3Wagon extends AbstractWagon implements RequestFactory {
 	public static final int DEFAULT_MAX_THREAD_COUNT = 50;
 	public static final int DEFAULT_DIVISOR = 50;
 	public static final int DEFAULT_READ_TIMEOUT = 60 * 1000;
-	public static final CannedAccessControlList DEFAULT_ACL = CannedAccessControlList.PublicRead;
+	public static final BucketCannedACL DEFAULT_ACL = BucketCannedACL.PUBLIC_READ;
 	private static final File TEMP_DIR = getCanonicalFile(System.getProperty("java.io.tmpdir"));
 	private static final String TEMP_DIR_PATH = TEMP_DIR.getAbsolutePath();
 
 	ThreadInvoker invoker = new ThreadInvoker();
-	SimpleFormatter formatter = new SimpleFormatter();
 	int minThreads = getMinThreads();
 	int maxThreads = getMaxThreads();
 	int divisor = getDivisor();
 	String protocol = getValue(PROTOCOL_KEY, HTTPS);
 	boolean http = HTTP.equals(protocol);
 	int readTimeout = DEFAULT_READ_TIMEOUT;
-	CannedAccessControlList acl = DEFAULT_ACL;
-	TransferManager transferManager;
+	BucketCannedACL acl = DEFAULT_ACL;
 
 	private static final Logger log = LoggerFactory.getLogger(S3Wagon.class);
 
-	AmazonS3Client client;
+	S3AsyncClient client;
 	String bucketName;
 	String basedir;
-
-	private final Mimetypes mimeTypes = Mimetypes.getInstance();
 
 	public S3Wagon() {
 		super(true);
@@ -129,27 +114,36 @@ public class S3Wagon extends AbstractWagon implements RequestFactory {
 		super.addTransferListener(listener);
 	}
 
-	protected void validateBucket(AmazonS3Client client, String bucketName) {
+	protected void validateBucket(S3AsyncClient client, String bucketName) {
 		log.debug("Looking for bucket: " + bucketName);
-		if (client.doesBucketExist(bucketName)) {
-			log.debug("Found bucket '" + bucketName + "' Validating permissions");
-			validatePermissions(client, bucketName);
-		} else {
-			log.info("Creating bucket " + bucketName);
-			// If we create the bucket, we "own" it and by default have the "fullcontrol" permission
-			client.createBucket(bucketName);
+
+		GetBucketLocationResponse locationResponse = null;
+		try {
+			if ( client.getBucketLocation(builder -> builder.bucket(bucketName)).get().sdkHttpResponse().isSuccessful()) {
+				log.debug("Found bucket '" + bucketName + "' Validating permissions");
+				validatePermissions(client, bucketName);
+			} else {
+				log.info("Creating bucket " + bucketName);
+				// If we create the bucket, we "own" it and by default have the "fullcontrol" permission
+				client.createBucket(builder -> builder.bucket(bucketName)).get();
+			}
+		} catch (InterruptedException | ExecutionException e) {
+			e.printStackTrace();
 		}
 	}
 
 	/**
 	 * Establish that we have enough permissions on this bucket to do what we need to do
 	 */
-	protected void validatePermissions(AmazonS3Client client, String bucketName) {
+	protected void validatePermissions(S3AsyncClient client, String bucketName) {
 		// This establishes our ability to list objects in this bucket
-		ListObjectsRequest zeroObjectsRequest = new ListObjectsRequest(bucketName, null, null, null, 0);
-		client.listObjects(zeroObjectsRequest);
+		try {
+			client.listObjects(builder -> builder.bucket(bucketName).maxKeys(0)).get();
+		} catch (InterruptedException | ExecutionException e) {
+			throw new RuntimeException(e);
+		}
 
-		/**
+		/*
 		 * The current AWS Java SDK does not appear to have a simple method for discovering what set of permissions the currently authenticated user has on a bucket. The AWS dev's
 		 * suggest that you attempt to perform an operation that would fail if you don't have the permission in question. You would then use the success/failure of that attempt to
 		 * establish what your permissions are. This is definitely not ideal and they are working on it, but it is not ready yet.
@@ -161,44 +155,35 @@ public class S3Wagon extends AbstractWagon implements RequestFactory {
 
 	}
 
-	protected CannedAccessControlList getAclFromRepository(Repository repository) {
-		RepositoryPermissions permissions = repository.getPermissions();
-		if (permissions == null) {
-			return null;
-		}
-		String filePermissions = permissions.getFileMode();
-		if (StringUtils.isBlank(filePermissions)) {
-			return null;
-		}
-		return CannedAccessControlList.valueOf(filePermissions.trim());
+	@Nullable
+	protected BucketCannedACL getAclFromRepository(Repository repository) {
+		return Optional.ofNullable(repository.getPermissions())
+			.map(RepositoryPermissions::getFileMode)
+			.map(String::trim)
+			.filter(value -> !value.isEmpty())
+			.map(BucketCannedACL::valueOf)
+			.orElse(null);
 	}
 
-	protected ClientConfiguration getClientConfiguration() {
-		ClientConfiguration configuration = new ClientConfiguration();
-		if (http) {
-			log.info("http selected");
-			configuration.setProtocol(Protocol.HTTP);
-		}
-		return configuration;
-	}
-
-	protected AmazonS3Client getAmazonS3Client(AWSCredentials credentials) {
-		ClientConfiguration configuration = getClientConfiguration();
-		return new AmazonS3Client(credentials, configuration);
+	protected S3AsyncClient getAmazonS3Client(AwsCredentials credentials) {
+		return S3AsyncClient.builder()
+			.credentialsProvider(() -> credentials)
+			.httpClientBuilder(NettyNioAsyncHttpClient.builder())
+			.build();
 	}
 
 	@Override
 	protected void connectToRepository(Repository source, AuthenticationInfo auth, ProxyInfo proxy) {
 
-		AWSCredentials credentials = getCredentials(auth);
+		AwsCredentials credentials = getCredentials(auth);
 		this.client = getAmazonS3Client(credentials);
-		this.transferManager = new TransferManager(credentials);
 		this.bucketName = source.getHost();
-		validateBucket(client, bucketName);
 		this.basedir = getBaseDir(source);
 
+		validateBucket(client, bucketName);
+
 		// If they've specified <filePermissions> in settings.xml, that always wins
-		CannedAccessControlList repoAcl = getAclFromRepository(source);
+		BucketCannedACL repoAcl = getAclFromRepository(source);
 		if (repoAcl != null) {
 			log.info("File permissions: " + repoAcl.name());
 			acl = repoAcl;
@@ -208,11 +193,15 @@ public class S3Wagon extends AbstractWagon implements RequestFactory {
 	@Override
 	protected boolean doesRemoteResourceExist(final String resourceName) {
 		try {
-			client.getObjectMetadata(bucketName, basedir + resourceName);
-		} catch (AmazonClientException e) {
-			return false;
+			return client.headObject(builder -> builder.bucket(bucketName).key(basedir + resourceName))
+				.get()
+				.sdkHttpResponse()
+				.isSuccessful();
+		} catch (InterruptedException | ExecutionException e) {
+			e.printStackTrace();
 		}
-		return true;
+
+		return false;
 	}
 
 	@Override
@@ -224,30 +213,11 @@ public class S3Wagon extends AbstractWagon implements RequestFactory {
 	 * Pull an object out of an S3 bucket and write it to a file
 	 */
 	@Override
-	protected void getResource(final String resourceName, final File destination, final TransferProgress progress) throws ResourceDoesNotExistException, IOException {
-		// Obtain the object from S3
-		S3Object object = null;
+	protected void getResource(final String resourceName, final File destination, final TransferProgress progress) throws ResourceDoesNotExistException {
 		try {
-			String key = basedir + resourceName;
-			object = client.getObject(bucketName, key);
+			client.getObject(builder -> builder.bucket(bucketName), destination.toPath()).get();
 		} catch (Exception e) {
 			throw new ResourceDoesNotExistException("Resource " + resourceName + " does not exist in the repository", e);
-		}
-
-		//
-		InputStream in = null;
-		OutputStream out = null;
-		try {
-			in = object.getObjectContent();
-			out = new TransferProgressFileOutputStream(destination, progress);
-			byte[] buffer = new byte[1024];
-			int length;
-			while ((length = in.read(buffer)) != -1) {
-				out.write(buffer, 0, length);
-			}
-		} finally {
-			IOUtils.closeQuietly(in);
-			IOUtils.closeQuietly(out);
 		}
 	}
 
@@ -256,8 +226,15 @@ public class S3Wagon extends AbstractWagon implements RequestFactory {
 	 */
 	@Override
 	protected boolean isRemoteResourceNewer(final String resourceName, final long timestamp) {
-		ObjectMetadata metadata = client.getObjectMetadata(bucketName, basedir + resourceName);
-		return metadata.getLastModified().compareTo(new Date(timestamp)) < 0;
+		try {
+			return client.headObject(builder -> builder.bucket(bucketName)
+				.key(basedir + resourceName)
+				.ifModifiedSince(Instant.ofEpochMilli(timestamp))).get().sdkHttpResponse().isSuccessful();
+		} catch (InterruptedException | ExecutionException e) {
+			e.printStackTrace();
+		}
+
+		return false;
 	}
 
 	/**
@@ -265,49 +242,30 @@ public class S3Wagon extends AbstractWagon implements RequestFactory {
 	 */
 	@Override
 	protected List<String> listDirectory(String directory) throws Exception {
-		// info("directory=" + directory);
-		if (StringUtils.isBlank(directory)) {
-			directory = "";
-		}
 		String delimiter = "/";
-		String prefix = basedir + directory;
-		if (!prefix.endsWith(delimiter)) {
-			prefix += delimiter;
-		}
-		// info("prefix=" + prefix);
-		ListObjectsRequest request = new ListObjectsRequest();
-		request.setBucketName(bucketName);
-		request.setPrefix(prefix);
-		request.setDelimiter(delimiter);
-		ObjectListing objectListing = client.listObjects(request);
-		// info("truncated=" + objectListing.isTruncated());
-		// info("prefix=" + prefix);
-		// info("basedir=" + basedir);
-		List<String> fileNames = new ArrayList<String>();
-		for (S3ObjectSummary summary : objectListing.getObjectSummaries()) {
-			// info("summary.getKey()=" + summary.getKey());
-			String key = summary.getKey();
-			String relativeKey = key.startsWith(basedir) ? key.substring(basedir.length()) : key;
-			boolean add = !StringUtils.isBlank(relativeKey) && !relativeKey.equals(directory);
-			if (add) {
-				// info("Adding key - " + relativeKey);
-				fileNames.add(relativeKey);
-			}
-		}
-		for (String commonPrefix : objectListing.getCommonPrefixes()) {
-			String value = commonPrefix.startsWith(basedir) ? commonPrefix.substring(basedir.length()) : commonPrefix;
-			// info("commonPrefix=" + commonPrefix);
-			// info("relativeValue=" + relativeValue);
-			// info("Adding common prefix - " + value);
-			fileNames.add(value);
-		}
-		// StringBuilder sb = new StringBuilder();
-		// sb.append("\n");
-		// for (String fileName : fileNames) {
-		// sb.append(fileName + "\n");
-		// }
-		// info(sb.toString());
-		return fileNames;
+		String dir = Optional.ofNullable(directory)
+			.map(String::trim)
+			.map(value -> value.endsWith(delimiter) ? value : value + delimiter)
+			.orElse("/");
+		String prefix = basedir + dir;
+
+		ListObjectsResponse response =
+			client.listObjects(builder -> builder.bucket(bucketName).prefix(prefix).delimiter(delimiter)).get();
+
+		Function<String, String> removeBaseDir = s -> s.startsWith(basedir) ? s.substring(basedir.length()) : s;
+
+		return Stream.concat(response.contents()
+													 .stream()
+													 .map(S3Object::key)
+													 .map(String::trim)
+													 .map(removeBaseDir)
+													 .filter(key -> !key.isEmpty())
+													 .filter(key -> !dir.equals(key)),
+												 response.commonPrefixes()
+													 .stream()
+													 .map(CommonPrefix::prefix)
+													 .map(String::trim)
+													 .map(removeBaseDir)).collect(Collectors.toList());
 	}
 
 	protected void info(String msg) {
@@ -502,26 +460,22 @@ public class S3Wagon extends AbstractWagon implements RequestFactory {
 	}
 
 	/**
-	 * Create AWSCredentionals from the information in system properties, environment variables, settings.xml, or EC2 instance metadata (only applicable when running the wagon on
-	 * an Amazon EC2 instance)
+	 * Create AwsCredentials from the information in system properties, environment variables, settings.xml, or EC2
+	 * instance metadata (only applicable when running the wagon on an Amazon EC2 instance)
 	 */
-	protected AWSCredentials getCredentials(final AuthenticationInfo authenticationInfo) {
-		Optional<AuthenticationInfo> auth = Optional.fromNullable(authenticationInfo);
-		AWSCredentialsProviderChain chain = new MavenAwsCredentialsProviderChain(auth);
-		AWSCredentials credentials = chain.getCredentials();
-		if (credentials instanceof AWSSessionCredentials) {
-			return new AwsSessionCredentials((AWSSessionCredentials) credentials);
-		} else {
-			return new AwsCredentials(credentials);
-		}
+	protected AwsCredentials getCredentials(final AuthenticationInfo authenticationInfo) {
+		return Optional.ofNullable(authenticationInfo)
+			.map(MavenAwsCredentialsProviderChain::create)
+			.orElseGet(MavenAwsCredentialsProviderChain::create)
+			.resolveCredentials();
 	}
 
 	@Override
 	protected PutFileContext getPutFileContext(File source, String destination) {
 		PutFileContext context = super.getPutFileContext(source, destination);
 		context.setFactory(this);
-		context.setTransferManager(this.transferManager);
 		context.setClient(this.client);
+		return context;
 		return context;
 	}
 

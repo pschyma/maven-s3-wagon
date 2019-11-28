@@ -15,7 +15,7 @@
  */
 package org.kuali.maven.wagon;
 
-import com.amazonaws.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
 public interface RequestFactory {
 
